@@ -1,0 +1,6 @@
+{
+  "name": "CROWNBREAK",
+  "description": "3D Tactical Chess & First-Person Arena Shooter where every capture is settled in a 1v1 FPS duel.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
