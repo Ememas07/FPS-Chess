@@ -33,8 +33,16 @@ export function TitleOverlay({
       <div className="relative z-10 my-auto max-w-lg pointer-events-auto">
         {/* Custom Inline SVG Title Emblem & Lockup */}
         <div className="mb-6">
-          <svg
-            viewBox="0 0 380 94"
+          <a
+            href="/"
+            title="Return to Hub"
+            className="block group cursor-pointer"
+          >
+            <span className="inline-flex items-center gap-1.5 mb-2.5 text-xs font-bold text-[#d4a853] group-hover:text-[#f3efe6] transition-colors">
+              <span aria-hidden="true">←</span> Return to Hub
+            </span>
+            <svg
+              viewBox="0 0 380 94"
             className="w-72 md:w-96 h-auto drop-shadow-[0_6px_18px_rgba(0,0,0,0.85)]"
             role="img"
             aria-label="CROWNBREAK"

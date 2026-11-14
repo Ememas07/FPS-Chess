@@ -1,4 +1,4 @@
-import { RotateCcw, Pause, Volume2, VolumeX, RefreshCw } from 'lucide-react';
+import { RotateCcw, Pause, Volume2, VolumeX, RefreshCw, Home } from 'lucide-react';
 import { CLASS_SPECS } from '../game/classes';
 import type { BoardHudSnapshot } from '../game/types';
 import { PieceSvgIcon } from './PieceSvgIcon';
