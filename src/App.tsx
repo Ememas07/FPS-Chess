@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { BoardHud } from './components/BoardHud';
 import { DuelHud } from './components/DuelHud';
+import { MultiplayerLobbyModal } from './components/MultiplayerLobbyModal';
 import { StatusModal } from './components/StatusModal';
 import { TitleOverlay } from './components/TitleOverlay';
 import { GameSceneController } from './engine/GameSceneController';
@@ -14,6 +15,7 @@ import {
   getLegalMovesForSquare,
   isKingInCheck,
 } from './game/chess';
+import type { RoomSnapshot, ServerWsMessage } from './game/multiplayerTypes';
 import type {
   AppState,
   BoardGrid,
@@ -28,6 +30,10 @@ import type {
   PieceType,
   SquareCoord,
 } from './game/types';
+import {
+  type ConnectionStatus,
+  MultiplayerClient,
+} from './net/multiplayerClient';
 
 const QUICK_DUEL_MATCHUPS: [PieceType, PieceType][] = [
   ['knight', 'bishop'],
@@ -46,10 +52,16 @@ function computeBoardHud(
   lastNotation: string | null,
   moveCount: number,
   aiThinking: boolean,
+  mpRoom: RoomSnapshot | null = null,
+  myColor: PieceColor | null = null,
 ): BoardHudSnapshot {
   const counts = countPieces(board);
   const selectedPiece = selected ? board[selected.row]?.[selected.col] ?? null : null;
   const captureMoveCount = legalMoves.filter((m) => m.captured !== null).length;
+  const opponent =
+    mpRoom && myColor
+      ? mpRoom.players.find((p) => p.color !== myColor)
+      : undefined;
 
   return {
     turn,
@@ -64,18 +76,37 @@ function computeBoardHud(
     lastMoveNotation: lastNotation,
     moveCount,
     aiThinking,
+    isMultiplayer: Boolean(mpRoom),
+    roomCode: mpRoom?.code,
+    myColor: myColor ?? undefined,
+    opponentName: opponent?.name,
+    opponentConnected: opponent ? opponent.connected : true,
   };
 }
 
 export default function App() {
   const canvasMountRef = useRef<HTMLDivElement | null>(null);
   const controllerRef = useRef<GameSceneController | null>(null);
+  const mpClientRef = useRef<MultiplayerClient | null>(null);
 
   const [appState, setAppState] = useState<AppState>('title');
   const [phase, setPhase] = useState<'board' | 'duel'>('board');
   const [mode, setMode] = useState<GameMode>('match');
   const [difficulty, setDifficulty] = useState<Difficulty>('tactician');
   const [muted, setMuted] = useState(false);
+
+  // Multiplayer UI state
+  const [mpLobbyOpen, setMpLobbyOpen] = useState(false);
+  const [mpConnectionStatus, setMpConnectionStatus] =
+    useState<ConnectionStatus>('disconnected');
+  const [mpRoom, setMpRoom] = useState<RoomSnapshot | null>(null);
+  const [mpColor, setMpColor] = useState<PieceColor | null>(null);
+  const [mpPlayerName, setMpPlayerName] = useState('Challenger');
+  const [mpError, setMpError] = useState<string | null>(null);
+  const [initialInviteCode] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get('room')?.trim().toUpperCase() || '';
+  });
 
   const [boardHud, setBoardHud] = useState<BoardHudSnapshot>(() =>
     computeBoardHud(createInitialBoard(), 'white', null, [], null, 0, false),
@@ -104,6 +135,15 @@ export default function App() {
   const aiTimerRef = useRef<number | null>(null);
   const quickMatchupIdxRef = useRef(0);
 
+  const mpLobbyOpenRef = useRef(false);
+  const mpRoomRef = useRef<RoomSnapshot | null>(null);
+  const mpColorRef = useRef<PieceColor | null>(null);
+  const mpPlayerIdRef = useRef<string | null>(null);
+  const mpPlayerNameRef = useRef('Challenger');
+  const pendingMpDuelRoomRef = useRef<RoomSnapshot | null>(null);
+  mpPlayerNameRef.current = mpPlayerName;
+  mpLobbyOpenRef.current = mpLobbyOpen;
+
   const syncBodyAttributes = useCallback(
     (nextState: AppState, nextPhase: 'board' | 'duel') => {
       document.body.dataset.state = nextState;
@@ -130,6 +170,8 @@ export default function App() {
         lastNotationRef.current,
         moveCountRef.current,
         aiThinkingRef.current,
+        mpRoomRef.current,
+        mpColorRef.current,
       ),
     );
   }, []);
@@ -142,6 +184,7 @@ export default function App() {
       }
       aiThinkingRef.current = false;
 
+      const isMp = mpRoomRef.current !== null;
       const finalSummary: MatchSummary = {
         winner,
         reason,
@@ -152,6 +195,8 @@ export default function App() {
         elapsedSeconds: (Date.now() - startTimeRef.current) / 1000,
         shotsFired: shotsFiredRef.current,
         shotsHit: shotsHitRef.current,
+        isMultiplayer: isMp,
+        myColor: mpColorRef.current ?? undefined,
       };
       setSummary(finalSummary);
       appStateRef.current = 'gameover';
@@ -173,6 +218,198 @@ export default function App() {
     [syncBodyAttributes],
   );
 
+  const applyRoomSnapshot = useCallback(
+    (room: RoomSnapshot, isInitialJoin = false) => {
+      const prevRoom = mpRoomRef.current;
+      mpRoomRef.current = room;
+      setMpRoom(room);
+      setMpError(null);
+
+      const myColorVal = mpColorRef.current ?? 'white';
+
+      if (room.status === 'waiting') {
+        if (appStateRef.current !== 'title') {
+          // Opponent left -> return cleanly to waiting lobby
+          boardRef.current = room.board;
+          selectedRef.current = null;
+          legalMovesRef.current = [];
+          activeDuelRef.current = null;
+          phaseRef.current = 'board';
+          setPhase('board');
+          appStateRef.current = 'title';
+          setAppState('title');
+          controllerRef.current?.startBoardPhase();
+          controllerRef.current?.setAppState('title');
+          syncBodyAttributes('title', 'board');
+        }
+        setMpLobbyOpen(true);
+        return;
+      }
+
+      if (room.status === 'playing') {
+        setMpLobbyOpen(false);
+        const enteringPlaying =
+          !prevRoom ||
+          prevRoom.status !== 'playing' ||
+          isInitialJoin ||
+          appStateRef.current !== 'playing';
+
+        if (enteringPlaying) {
+          modeRef.current = 'match';
+          setMode('match');
+          startTimeRef.current = Date.now();
+          shotsFiredRef.current = 0;
+          shotsHitRef.current = 0;
+          setSummary(null);
+          controllerRef.current?.setBoardFlipped(myColorVal === 'black');
+        }
+
+        const prevMoveCount = moveCountRef.current;
+        boardRef.current = room.board;
+        turnRef.current = room.turn;
+        lastNotationRef.current = room.lastMoveNotation;
+        moveCountRef.current = room.moveCount;
+        duelsFoughtRef.current = room.duelsFought;
+        duelsWonRef.current =
+          myColorVal === 'white' ? room.whiteDuelsWon : room.blackDuelsWon;
+
+        if (room.phase === 'board') {
+          pendingMpDuelRoomRef.current = null;
+          activeDuelRef.current = null;
+          selectedRef.current = null;
+          legalMovesRef.current = [];
+
+          if (phaseRef.current !== 'board' || enteringPlaying) {
+            phaseRef.current = 'board';
+            setPhase('board');
+            appStateRef.current = 'playing';
+            setAppState('playing');
+            controllerRef.current?.startBoardPhase();
+            controllerRef.current?.setAppState('playing');
+            syncBodyAttributes('playing', 'board');
+          } else if (room.moveCount > prevMoveCount) {
+            controllerRef.current?.audio.playPieceMove();
+          }
+          refreshBoardVisuals();
+          return;
+        }
+
+        if (room.phase === 'duel' && room.duel) {
+          if (phaseRef.current !== 'duel' || enteringPlaying) {
+            appStateRef.current = 'playing';
+            setAppState('playing');
+            controllerRef.current?.setAppState('playing');
+            beginDuel({
+              attacker: room.duel.attacker,
+              defender: room.duel.defender,
+              move: room.duel.move,
+              playerColor: myColorVal,
+              isPlayerAttacker: room.duel.attacker.color === myColorVal,
+              isMultiplayer: true,
+            });
+          }
+          return;
+        }
+      }
+
+      if (room.status === 'gameover') {
+        setMpLobbyOpen(false);
+        boardRef.current = room.board;
+        moveCountRef.current = room.moveCount;
+        duelsFoughtRef.current = room.duelsFought;
+        duelsWonRef.current =
+          myColorVal === 'white' ? room.whiteDuelsWon : room.blackDuelsWon;
+        if (phaseRef.current !== 'board') {
+          phaseRef.current = 'board';
+          setPhase('board');
+          controllerRef.current?.startBoardPhase();
+        }
+        refreshBoardVisuals();
+        if (appStateRef.current !== 'gameover') {
+          finishMatch(
+            room.winner ?? 'white',
+            room.winReason ?? 'Match concluded.',
+          );
+        }
+      }
+    },
+    [beginDuel, finishMatch, refreshBoardVisuals, syncBodyAttributes],
+  );
+
+  const handleServerMessage = useCallback(
+    (msg: ServerWsMessage) => {
+      switch (msg.type) {
+        case 'room:joined': {
+          mpColorRef.current = msg.color;
+          mpPlayerIdRef.current = msg.playerId;
+          setMpColor(msg.color);
+          setMpError(null);
+          mpClientRef.current?.setSessionInfo(
+            msg.code,
+            msg.playerId,
+            mpPlayerNameRef.current,
+          );
+          try {
+            window.history.replaceState(null, '', `/?room=${msg.code}`);
+          } catch {
+            // Ignore restricted history state
+          }
+          applyRoomSnapshot(msg.room, true);
+          break;
+        }
+        case 'room:state': {
+          applyRoomSnapshot(msg.room);
+          break;
+        }
+        case 'room:error': {
+          setMpError(msg.message);
+          break;
+        }
+        case 'duel:remote_pose': {
+          if (msg.color !== mpColorRef.current) {
+            controllerRef.current?.applyRemotePose(
+              msg.x,
+              msg.y,
+              msg.z,
+              msg.yaw,
+              msg.pitch,
+            );
+          }
+          break;
+        }
+        case 'duel:shot': {
+          controllerRef.current?.applyServerShot(msg);
+          break;
+        }
+        case 'duel:vitals': {
+          controllerRef.current?.applyServerVitals(msg);
+          break;
+        }
+        case 'duel:ended': {
+          pendingMpDuelRoomRef.current = msg.room;
+          const playerWon = msg.winnerColor === mpColorRef.current;
+          controllerRef.current?.applyServerDuelEnded(playerWon);
+          break;
+        }
+      }
+    },
+    [applyRoomSnapshot],
+  );
+
+  const handleServerMessageRef = useRef(handleServerMessage);
+  handleServerMessageRef.current = handleServerMessage;
+
+  const ensureMpClient = useCallback((): MultiplayerClient => {
+    if (!mpClientRef.current) {
+      mpClientRef.current = new MultiplayerClient(
+        (msg) => handleServerMessageRef.current(msg),
+        (status) => setMpConnectionStatus(status),
+      );
+    }
+    mpClientRef.current.connect();
+    return mpClientRef.current;
+  }, []);
+
   const scheduleAiTurn = useCallback(() => {
     if (aiTimerRef.current) window.clearTimeout(aiTimerRef.current);
     aiThinkingRef.current = true;
@@ -183,7 +420,8 @@ export default function App() {
       if (
         appStateRef.current !== 'playing' ||
         phaseRef.current !== 'board' ||
-        turnRef.current !== 'black'
+        turnRef.current !== 'black' ||
+        mpRoomRef.current !== null
       ) {
         aiThinkingRef.current = false;
         return;
@@ -228,12 +466,16 @@ export default function App() {
 
   const handleSquareClick = useCallback(
     (coord: SquareCoord) => {
-      if (
-        appStateRef.current !== 'playing' ||
-        phaseRef.current !== 'board' ||
-        turnRef.current !== 'white' ||
-        aiThinkingRef.current
-      ) {
+      if (appStateRef.current !== 'playing' || phaseRef.current !== 'board') {
+        return;
+      }
+
+      const isMp = mpRoomRef.current !== null;
+      const myTurnColor: PieceColor = isMp
+        ? (mpColorRef.current ?? 'white')
+        : 'white';
+
+      if (turnRef.current !== myTurnColor || (!isMp && aiThinkingRef.current)) {
         return;
       }
 
@@ -248,6 +490,17 @@ export default function App() {
       if (targetMove) {
         selectedRef.current = null;
         legalMovesRef.current = [];
+
+        if (isMp) {
+          mpClientRef.current?.send({
+            type: 'chess:move',
+            from: targetMove.from,
+            to: targetMove.to,
+          });
+          refreshBoardVisuals();
+          return;
+        }
+
         moveCountRef.current += 1;
         lastNotationRef.current = targetMove.notation;
 
@@ -269,8 +522,8 @@ export default function App() {
         return;
       }
 
-      // Select a White piece
-      if (clickedPiece && clickedPiece.color === 'white') {
+      // Select one of our own pieces
+      if (clickedPiece && clickedPiece.color === myTurnColor) {
         selectedRef.current = { ...coord };
         legalMovesRef.current = getLegalMovesForSquare(board, coord);
         controllerRef.current?.audio.playSelect();
@@ -289,13 +542,25 @@ export default function App() {
       playerWon: boolean,
       stats: { shotsFired: number; shotsHit: number },
     ) => {
-      duelsFoughtRef.current += 1;
-      if (playerWon) duelsWonRef.current += 1;
       shotsFiredRef.current += stats.shotsFired;
       shotsHitRef.current += stats.shotsHit;
 
       const duel = activeDuelRef.current;
       activeDuelRef.current = null;
+
+      if (mpRoomRef.current !== null) {
+        const pendingRoom = pendingMpDuelRoomRef.current;
+        pendingMpDuelRoomRef.current = null;
+        if (pendingRoom) {
+          applyRoomSnapshot(pendingRoom);
+        } else {
+          mpClientRef.current?.send({ type: 'room:sync' });
+        }
+        return;
+      }
+
+      duelsFoughtRef.current += 1;
+      if (playerWon) duelsWonRef.current += 1;
 
       if (modeRef.current === 'quickduel' || !duel || !duel.move) {
         finishMatch(
@@ -341,7 +606,7 @@ export default function App() {
         finishMatch('black', 'White has no legal moves remaining.');
       }
     },
-    [finishMatch, refreshBoardVisuals, scheduleAiTurn, syncBodyAttributes],
+    [applyRoomSnapshot, finishMatch, refreshBoardVisuals, scheduleAiTurn, syncBodyAttributes],
   );
 
   const startMatch = useCallback(() => {
@@ -352,6 +617,12 @@ export default function App() {
     if (document.activeElement instanceof HTMLElement) {
       document.activeElement.blur();
     }
+
+    mpRoomRef.current = null;
+    mpColorRef.current = null;
+    setMpRoom(null);
+    setMpColor(null);
+    setMpLobbyOpen(false);
 
     modeRef.current = 'match';
     setMode('match');
@@ -375,6 +646,7 @@ export default function App() {
     appStateRef.current = 'playing';
     setAppState('playing');
 
+    controllerRef.current?.setBoardFlipped(false);
     controllerRef.current?.setDifficulty(difficultyRef.current);
     controllerRef.current?.startBoardPhase();
     controllerRef.current?.setAppState('playing');
@@ -390,6 +662,12 @@ export default function App() {
     if (document.activeElement instanceof HTMLElement) {
       document.activeElement.blur();
     }
+
+    mpRoomRef.current = null;
+    mpColorRef.current = null;
+    setMpRoom(null);
+    setMpColor(null);
+    setMpLobbyOpen(false);
 
     modeRef.current = 'quickduel';
     setMode('quickduel');
@@ -433,6 +711,7 @@ export default function App() {
   }, [beginDuel]);
 
   const handleRestart = useCallback(() => {
+    if (mpRoomRef.current !== null) return;
     if (modeRef.current === 'quickduel') {
       startQuickDuel();
     } else {
@@ -451,11 +730,36 @@ export default function App() {
       setAppState('playing');
       controllerRef.current?.setAppState('playing');
       syncBodyAttributes('playing', phaseRef.current);
-      if (phaseRef.current === 'board' && turnRef.current === 'black') {
+      if (
+        mpRoomRef.current === null &&
+        phaseRef.current === 'board' &&
+        turnRef.current === 'black'
+      ) {
         scheduleAiTurn();
       }
     }
   }, [scheduleAiTurn, syncBodyAttributes]);
+
+  const handleLeaveMultiplayer = useCallback(() => {
+    if (mpClientRef.current) {
+      mpClientRef.current.send({ type: 'room:leave' });
+      mpClientRef.current.disconnect();
+    }
+    mpRoomRef.current = null;
+    mpColorRef.current = null;
+    mpPlayerIdRef.current = null;
+    pendingMpDuelRoomRef.current = null;
+    setMpRoom(null);
+    setMpColor(null);
+    setMpError(null);
+    try {
+      if (window.location.search.includes('room=')) {
+        window.history.replaceState(null, '', '/');
+      }
+    } catch {
+      // Ignore
+    }
+  }, []);
 
   const handleReturnTitle = useCallback(() => {
     if (aiTimerRef.current) {
@@ -463,6 +767,10 @@ export default function App() {
       aiTimerRef.current = null;
     }
     aiThinkingRef.current = false;
+    if (mpRoomRef.current) {
+      handleLeaveMultiplayer();
+    }
+    setMpLobbyOpen(false);
     boardRef.current = createInitialBoard();
     selectedRef.current = null;
     legalMovesRef.current = [];
@@ -471,11 +779,12 @@ export default function App() {
     setPhase('board');
     appStateRef.current = 'title';
     setAppState('title');
+    controllerRef.current?.setBoardFlipped(false);
     controllerRef.current?.startBoardPhase();
     controllerRef.current?.setAppState('title');
     syncBodyAttributes('title', 'board');
     refreshBoardVisuals();
-  }, [refreshBoardVisuals, syncBodyAttributes]);
+  }, [handleLeaveMultiplayer, refreshBoardVisuals, syncBodyAttributes]);
 
   const handleToggleMute = useCallback(() => {
     if (!controllerRef.current) return;
@@ -487,6 +796,48 @@ export default function App() {
     difficultyRef.current = nextDiff;
     setDifficulty(nextDiff);
     controllerRef.current?.setDifficulty(nextDiff);
+  }, []);
+
+  const handleOpenMultiplayer = useCallback(() => {
+    setMpError(null);
+    setMpLobbyOpen(true);
+    ensureMpClient();
+  }, [ensureMpClient]);
+
+  const handleCreateRoom = useCallback(() => {
+    setMpError(null);
+    const client = ensureMpClient();
+    client.send({
+      type: 'room:create',
+      playerName: mpPlayerNameRef.current,
+      isPublic: false,
+    });
+  }, [ensureMpClient]);
+
+  const handleJoinRoom = useCallback(
+    (code: string) => {
+      setMpError(null);
+      const client = ensureMpClient();
+      client.send({
+        type: 'room:join',
+        code: code.trim().toUpperCase(),
+        playerName: mpPlayerNameRef.current,
+      });
+    },
+    [ensureMpClient],
+  );
+
+  const handleQuickMatch = useCallback(() => {
+    setMpError(null);
+    const client = ensureMpClient();
+    client.send({
+      type: 'room:quickmatch',
+      playerName: mpPlayerNameRef.current,
+    });
+  }, [ensureMpClient]);
+
+  const handleRematch = useCallback(() => {
+    mpClientRef.current?.send({ type: 'room:rematch' });
   }, []);
 
   // Stable refs for scene callbacks
@@ -514,21 +865,62 @@ export default function App() {
       onDuelComplete: (won, stats) =>
         callbacksRef.current.onDuelComplete(won, stats),
       onPauseRequest: () => callbacksRef.current.onPauseRequest(),
+      onMultiplayerPose: (x, y, z, yaw, pitch) => {
+        mpClientRef.current?.send({
+          type: 'duel:pose',
+          x,
+          y,
+          z,
+          yaw,
+          pitch,
+        });
+      },
+      onMultiplayerFire: (ox, oy, oz, dx, dy, dz) => {
+        mpClientRef.current?.send({
+          type: 'duel:fire',
+          ox,
+          oy,
+          oz,
+          dx,
+          dy,
+          dz,
+        });
+      },
+      onMultiplayerAbility: (aim) => {
+        mpClientRef.current?.send({
+          type: 'duel:ability',
+          ...(aim ?? {}),
+        });
+      },
+      onMultiplayerReload: () => {
+        mpClientRef.current?.send({ type: 'duel:reload' });
+      },
     });
     controllerRef.current = controller;
     controller.syncBoardState(boardRef.current, null, []);
     syncBodyAttributes('title', 'board');
 
-    // Support ?autostart=1 and ?quickduel=1 query params
+    // Support ?autostart=1, ?quickduel=1, and ?room=CODE query params
     const params = new URLSearchParams(window.location.search);
+    const inviteCode = params.get('room')?.trim().toUpperCase();
     if (params.get('quickduel') === '1') {
       startQuickDuel();
     } else if (params.get('autostart') === '1') {
       startMatch();
+    } else if (inviteCode) {
+      setMpLobbyOpen(true);
+      const client = ensureMpClient();
+      client.send({
+        type: 'room:join',
+        code: inviteCode,
+        playerName: 'Challenger',
+      });
     }
 
     return () => {
       if (aiTimerRef.current) window.clearTimeout(aiTimerRef.current);
+      mpClientRef.current?.disconnect();
+      mpClientRef.current = null;
       controller.dispose();
       controllerRef.current = null;
     };
@@ -538,7 +930,24 @@ export default function App() {
   // Global keyboard shortcuts (Title start, Pause, Mute, Board Restart)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')
+      ) {
+        if (e.code === 'Escape' && mpLobbyOpenRef.current) {
+          setMpLobbyOpen(false);
+        }
+        return;
+      }
+
       if (appStateRef.current === 'title') {
+        if (mpLobbyOpenRef.current) {
+          if (e.code === 'Escape') {
+            setMpLobbyOpen(false);
+          }
+          return;
+        }
         if (e.code === 'Enter' || e.code === 'Space') {
           e.preventDefault();
           startMatch();
@@ -565,7 +974,8 @@ export default function App() {
       if (
         e.code === 'KeyR' &&
         appStateRef.current === 'playing' &&
-        phaseRef.current === 'board'
+        phaseRef.current === 'board' &&
+        mpRoomRef.current === null
       ) {
         handleRestart();
       }
@@ -584,12 +994,34 @@ export default function App() {
         data-testid="scene-container"
       />
 
-      {appState === 'title' && (
+      {appState === 'title' && !mpLobbyOpen && (
         <TitleOverlay
           difficulty={difficulty}
           onSelectDifficulty={handleDifficultyChange}
           onStartMatch={startMatch}
+          onOpenMultiplayer={handleOpenMultiplayer}
           onQuickDuel={startQuickDuel}
+        />
+      )}
+
+      {appState === 'title' && mpLobbyOpen && (
+        <MultiplayerLobbyModal
+          connectionStatus={mpConnectionStatus}
+          room={mpRoom}
+          playerName={mpPlayerName}
+          error={mpError}
+          initialCode={initialInviteCode}
+          onPlayerNameChange={setMpPlayerName}
+          onCreateRoom={handleCreateRoom}
+          onJoinRoom={handleJoinRoom}
+          onQuickMatch={handleQuickMatch}
+          onLeaveRoom={handleLeaveMultiplayer}
+          onClose={() => {
+            if (mpRoomRef.current) {
+              handleLeaveMultiplayer();
+            }
+            setMpLobbyOpen(false);
+          }}
         />
       )}
 
@@ -617,8 +1049,10 @@ export default function App() {
         <StatusModal
           state={appState}
           summary={summary}
+          isMultiplayer={mpRoom !== null}
           onResume={handlePauseToggle}
           onRestart={handleRestart}
+          onRematch={handleRematch}
           onReturnTitle={handleReturnTitle}
         />
       )}

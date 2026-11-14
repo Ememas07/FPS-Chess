@@ -3,8 +3,10 @@ import type { AppState, MatchSummary } from '../game/types';
 interface StatusModalProps {
   state: Extract<AppState, 'paused' | 'gameover'>;
   summary: MatchSummary | null;
+  isMultiplayer?: boolean;
   onResume: () => void;
   onRestart: () => void;
+  onRematch?: () => void;
   onReturnTitle: () => void;
 }
 
@@ -18,8 +20,10 @@ function formatTime(totalSeconds: number): string {
 export function StatusModal({
   state,
   summary,
+  isMultiplayer = false,
   onResume,
   onRestart,
+  onRematch,
   onReturnTitle,
 }: StatusModalProps) {
   if (state === 'paused') {
@@ -32,10 +36,12 @@ export function StatusModal({
       >
         <div className="w-full max-w-sm rounded-xl bg-[#121622] border border-[#d4a853]/35 p-6 shadow-2xl">
           <h2 className="font-display text-2xl font-bold text-[#f3efe6] tracking-wide text-center">
-            Match Paused
+            {isMultiplayer ? 'Match Menu' : 'Match Paused'}
           </h2>
           <p className="text-xs text-[#9ca3af] text-center mt-1 mb-6">
-            Press Esc or P to resume combat.
+            {isMultiplayer
+              ? 'Online match stays live while menu is open. Press Esc or P to return.'
+              : 'Press Esc or P to resume combat.'}
           </p>
 
           <div className="flex flex-col gap-2.5">
@@ -46,19 +52,21 @@ export function StatusModal({
             >
               Resume
             </button>
-            <button
-              type="button"
-              onClick={onRestart}
-              className="w-full py-2.5 px-4 rounded-lg bg-[#1c2233] hover:bg-[#252d42] text-[#f3efe6] border border-white/12 font-semibold text-sm cursor-pointer transition-colors"
-            >
-              Restart
-            </button>
+            {!isMultiplayer && (
+              <button
+                type="button"
+                onClick={onRestart}
+                className="w-full py-2.5 px-4 rounded-lg bg-[#1c2233] hover:bg-[#252d42] text-[#f3efe6] border border-white/12 font-semibold text-sm cursor-pointer transition-colors"
+              >
+                Restart
+              </button>
+            )}
             <button
               type="button"
               onClick={onReturnTitle}
               className="w-full py-2.5 px-4 rounded-lg bg-transparent hover:bg-white/5 text-[#cbd5e1] border border-white/10 font-medium text-sm cursor-pointer transition-colors"
             >
-              Title Screen
+              {isMultiplayer ? 'Leave Match' : 'Title Screen'}
             </button>
           </div>
         </div>
@@ -66,7 +74,10 @@ export function StatusModal({
     );
   }
 
-  const isVictory = summary?.winner === 'white';
+  const isVictory =
+    summary?.isMultiplayer && summary.myColor
+      ? summary.winner === summary.myColor
+      : summary?.winner === 'white';
   const accuracy =
     summary && summary.shotsFired > 0
       ? Math.round((summary.shotsHit / summary.shotsFired) * 100)
@@ -130,17 +141,17 @@ export function StatusModal({
           <button
             type="button"
             data-start="true"
-            onClick={onRestart}
+            onClick={summary?.isMultiplayer && onRematch ? onRematch : onRestart}
             className="flex-1 py-2.5 px-4 rounded-lg bg-[#d4a853] hover:bg-[#e1b967] text-[#0b0d12] font-semibold text-sm cursor-pointer transition-colors"
           >
-            Play Again
+            {summary?.isMultiplayer ? 'Rematch' : 'Play Again'}
           </button>
           <button
             type="button"
             onClick={onReturnTitle}
             className="flex-1 py-2.5 px-4 rounded-lg bg-[#1c2233] hover:bg-[#252d42] text-[#f3efe6] border border-white/12 font-semibold text-sm cursor-pointer transition-colors"
           >
-            Title Screen
+            {summary?.isMultiplayer ? 'Leave Room' : 'Title Screen'}
           </button>
         </div>
       </div>

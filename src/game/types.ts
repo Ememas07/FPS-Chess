@@ -62,6 +62,7 @@ export interface DuelConfig {
   move: ChessMove | null; // null in Quick Duel mode
   playerColor: PieceColor;
   isPlayerAttacker: boolean;
+  isMultiplayer?: boolean;
 }
 
 export interface DuelHudSnapshot {
@@ -100,6 +101,11 @@ export interface BoardHudSnapshot {
   lastMoveNotation: string | null;
   moveCount: number;
   aiThinking: boolean;
+  isMultiplayer?: boolean;
+  roomCode?: string;
+  myColor?: PieceColor;
+  opponentName?: string;
+  opponentConnected?: boolean;
 }
 
 export interface MatchSummary {
@@ -112,4 +118,6 @@ export interface MatchSummary {
   elapsedSeconds: number;
   shotsFired: number;
   shotsHit: number;
+  isMultiplayer?: boolean;
+  myColor?: PieceColor;
 }

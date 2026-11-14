@@ -1,4 +1,4 @@
-import type { ClassSpec, PieceType } from './types';
+import type { ClassSpec, PieceType } from './types.ts';
 
 export const CLASS_SPECS: Record<PieceType, ClassSpec> = {
   pawn: {

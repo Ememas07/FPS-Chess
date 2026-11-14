@@ -1,4 +1,4 @@
-import { PIECE_VALUES } from './classes';
+import { PIECE_VALUES } from './classes.ts';
 import type {
   BoardGrid,
   ChessMove,
@@ -7,7 +7,7 @@ import type {
   PieceColor,
   PieceType,
   SquareCoord,
-} from './types';
+} from './types.ts';
 
 const FILES = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'] as const;
 const BACK_RANK: PieceType[] = [

@@ -24,6 +24,17 @@ export function BoardHud({
     ? CLASS_SPECS[hud.selectedPiece.type]
     : null;
 
+  const myColorLabel = hud.myColor === 'black' ? 'Black' : 'White';
+  const turnLabel = hud.isMultiplayer
+    ? hud.turn === hud.myColor
+      ? `Your Turn · ${myColorLabel}`
+      : `Opponent's Turn · ${hud.turn === 'white' ? 'White' : 'Black'}`
+    : hud.aiThinking
+      ? 'Black Thinking...'
+      : hud.turn === 'white'
+        ? 'White to Move'
+        : 'Black to Move';
+
   return (
     <div className="fixed inset-0 z-10 pointer-events-none flex flex-col justify-between p-4 md:p-6">
       {/* Top Perimeter Row */}
@@ -32,11 +43,7 @@ export function BoardHud({
         <div className="bg-[#0e1118]/88 border border-white/12 rounded-lg px-4 py-2.5 shadow-lg">
           <div className="flex items-center gap-3">
             <span className="font-display text-base md:text-lg font-bold tracking-wide text-[#f3efe6] hud-stroke">
-              {hud.aiThinking
-                ? 'Black Thinking...'
-                : hud.turn === 'white'
-                  ? 'White to Move'
-                  : 'Black to Move'}
+              {turnLabel}
             </span>
             {(hud.whiteInCheck || hud.blackInCheck) && (
               <span className="text-xs font-bold uppercase tracking-wider text-[#f87171]">
@@ -44,7 +51,23 @@ export function BoardHud({
               </span>
             )}
           </div>
-          <div className="flex items-center gap-2.5 text-xs text-[#a1a8b8] mt-0.5 font-mono-num">
+          <div className="flex flex-wrap items-center gap-2.5 text-xs text-[#a1a8b8] mt-0.5 font-mono-num">
+            {hud.isMultiplayer && hud.roomCode && (
+              <>
+                <span className="text-[#d4a853]">Room {hud.roomCode}</span>
+                <span aria-hidden="true">·</span>
+                <span
+                  className={
+                    hud.opponentConnected === false ? 'text-[#fbbf24]' : ''
+                  }
+                >
+                  {hud.opponentConnected === false
+                    ? `${hud.opponentName ?? 'Opponent'} Reconnecting`
+                    : `vs ${hud.opponentName ?? 'Opponent'}`}
+                </span>
+                <span aria-hidden="true">·</span>
+              </>
+            )}
             <span>White {hud.whitePiecesLeft}</span>
             <span aria-hidden="true">·</span>
             <span>Black {hud.blackPiecesLeft}</span>
@@ -85,19 +108,21 @@ export function BoardHud({
           >
             {muted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
           </button>
-          <button
-            type="button"
-            tabIndex={-1}
-            onClick={(e) => {
-              e.currentTarget.blur();
-              onRestart();
-            }}
-            aria-label="Restart Match [R]"
-            title="Restart [R]"
-            className="w-10 h-10 rounded-lg bg-[#0e1118]/88 hover:bg-[#1b202e] border border-white/14 flex items-center justify-center text-[#e5e7eb] cursor-pointer transition-colors"
-          >
-            <RotateCcw className="w-4 h-4" />
-          </button>
+          {!hud.isMultiplayer && (
+            <button
+              type="button"
+              tabIndex={-1}
+              onClick={(e) => {
+                e.currentTarget.blur();
+                onRestart();
+              }}
+              aria-label="Restart Match [R]"
+              title="Restart [R]"
+              className="w-10 h-10 rounded-lg bg-[#0e1118]/88 hover:bg-[#1b202e] border border-white/14 flex items-center justify-center text-[#e5e7eb] cursor-pointer transition-colors"
+            >
+              <RotateCcw className="w-4 h-4" />
+            </button>
+          )}
           <button
             type="button"
             tabIndex={-1}
@@ -158,8 +183,11 @@ export function BoardHud({
             </div>
           ) : (
             <div className="text-xs md:text-sm text-[#cbd5e1]">
-              Select a White piece to move, or target an enemy piece on a red
-              square to start an FPS Duel.
+              {hud.isMultiplayer
+                ? hud.turn === hud.myColor
+                  ? `Select a ${myColorLabel} piece to move, or target an enemy piece on a red square to start an FPS Duel.`
+                  : `Waiting for ${hud.opponentName ?? 'opponent'} to move...`
+                : 'Select a White piece to move, or target an enemy piece on a red square to start an FPS Duel.'}
             </div>
           )}
         </div>

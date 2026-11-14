@@ -84,6 +84,32 @@ export interface SceneCallbacks {
     stats: { shotsFired: number; shotsHit: number },
   ) => void;
   onPauseRequest: () => void;
+  onMultiplayerPose?: (
+    x: number,
+    y: number,
+    z: number,
+    yaw: number,
+    pitch: number,
+  ) => void;
+  onMultiplayerFire?: (
+    ox: number,
+    oy: number,
+    oz: number,
+    dx: number,
+    dy: number,
+    dz: number,
+  ) => void;
+  onMultiplayerAbility?: (
+    aim?: {
+      ox: number;
+      oy: number;
+      oz: number;
+      dx: number;
+      dy: number;
+      dz: number;
+    },
+  ) => void;
+  onMultiplayerReload?: () => void;
 }
 
 function squareToWorld(row: number, col: number): { x: number; z: number } {
@@ -186,6 +212,11 @@ export class GameSceneController {
   private enemyShieldTimer = 0;
   private enemyAbilityCooldown = 5.0;
   private enemyKoAngle = 0;
+
+  // Multiplayer duel sync state
+  private remotePoseTarget = { x: 0, y: 0, z: -11.2, yaw: Math.PI, pitch: 0 };
+  private lastPoseEmitTime = 0;
+  private lastRemoteShotSfxTime = 0;
 
   // Viewmodel & visual FX
   private viewModelAnchor = new THREE.Group();
@@ -724,6 +755,10 @@ export class GameSceneController {
     this.boardFlipped = !this.boardFlipped;
   }
 
+  public setBoardFlipped(flipped: boolean): void {
+    this.boardFlipped = flipped;
+  }
+
   public startBoardPhase(): void {
     this.playPhase = 'board';
     this.duelConfig = null;
@@ -770,11 +805,18 @@ export class GameSceneController {
     const pSpec = CLASS_SPECS[playerPiece.type];
     const eSpec = CLASS_SPECS[enemyPiece.type];
 
-    // Spawn player on +Z side facing -Z (clear sightline down x = 0)
-    this.duelPlayerPos.set(0, 0, 11.2);
+    const isMp = Boolean(config.isMultiplayer);
+    const isWhitePlayer = config.playerColor === 'white';
+    const playerSpawnZ = isMp ? (isWhitePlayer ? 11.2 : -11.2) : 11.2;
+    const playerSpawnYaw = isMp ? (isWhitePlayer ? 0 : Math.PI) : 0;
+    const enemySpawnZ = isMp ? (isWhitePlayer ? -11.2 : 11.2) : -11.2;
+    const enemyInitialRotY = isMp ? (isWhitePlayer ? 0 : Math.PI) : 0;
+
+    // Spawn player facing arena center
+    this.duelPlayerPos.set(0, 0, playerSpawnZ);
     this.duelPlayerVel.set(0, 0, 0);
     this.duelPlayerGrounded = true;
-    this.duelYaw = 0;
+    this.duelYaw = playerSpawnYaw;
     this.duelPitch = 0;
     this.duelPlayerHp = pSpec.maxHp;
     this.duelPlayerMaxHp = pSpec.maxHp;
@@ -792,6 +834,15 @@ export class GameSceneController {
     this.duelOutcomeWon = null;
     this.duelBannerText = `${pSpec.label.toUpperCase()} VS ${eSpec.label.toUpperCase()}`;
     this.duelBannerTimer = 1.6;
+    this.lastPoseEmitTime = 0;
+    this.lastRemoteShotSfxTime = 0;
+    this.remotePoseTarget = {
+      x: 0,
+      y: 0,
+      z: enemySpawnZ,
+      yaw: isWhitePlayer ? Math.PI : 0,
+      pitch: 0,
+    };
 
     // Setup 1st-person 3D weapon viewmodel
     if (this.currentViewModel) {
@@ -806,7 +857,7 @@ export class GameSceneController {
     this.muzzleFlashMesh.position.copy(vm.muzzleOffset);
     this.muzzleFlashMesh.visible = false;
 
-    // Spawn Enemy combatant on -Z side facing +Z
+    // Spawn Enemy combatant on opposite side
     if (this.enemyGroup) {
       this.scene.remove(this.enemyGroup);
     }
@@ -816,10 +867,10 @@ export class GameSceneController {
       this.palette,
     );
     this.enemyGroup.scale.setScalar(DUEL_ENEMY_SCALE);
-    this.enemyPos.set(0, 0, -11.2);
+    this.enemyPos.set(0, 0, enemySpawnZ);
     this.enemyVel.set(0, 0, 0);
     this.enemyGroup.position.copy(this.enemyPos);
-    this.enemyGroup.rotation.y = 0;
+    this.enemyGroup.rotation.y = enemyInitialRotY;
     this.scene.add(this.enemyGroup);
 
     this.enemyMaxHp = eSpec.maxHp;
@@ -841,6 +892,141 @@ export class GameSceneController {
     this.camera.rotation.set(this.duelPitch, this.duelYaw, 0);
 
     this.audio.playDuelHorn();
+    this.emitDuelHud();
+  }
+
+  public applyRemotePose(
+    x: number,
+    y: number,
+    z: number,
+    yaw: number,
+    pitch: number,
+  ): void {
+    this.remotePoseTarget.x = x;
+    this.remotePoseTarget.y = y;
+    this.remotePoseTarget.z = z;
+    this.remotePoseTarget.yaw = yaw;
+    this.remotePoseTarget.pitch = pitch;
+  }
+
+  public applyServerShot(shot: {
+    shooter: PieceColor;
+    ox: number;
+    oy: number;
+    oz: number;
+    dx: number;
+    dy: number;
+    dz: number;
+    hit: boolean;
+    headshot: boolean;
+    damage: number;
+    hitX: number;
+    hitY: number;
+    hitZ: number;
+  }): void {
+    if (!this.duelConfig || this.playPhase !== 'duel') return;
+    const isLocalShooter = shot.shooter === this.duelConfig.playerColor;
+    const shooterPiece = isLocalShooter
+      ? this.duelConfig.isPlayerAttacker
+        ? this.duelConfig.attacker
+        : this.duelConfig.defender
+      : this.duelConfig.isPlayerAttacker
+        ? this.duelConfig.defender
+        : this.duelConfig.attacker;
+    const spec = CLASS_SPECS[shooterPiece.type];
+    const accentHex = parseInt(spec.accentHex.slice(1), 16);
+
+    if (!isLocalShooter) {
+      const now = performance.now();
+      if (now - this.lastRemoteShotSfxTime > 65) {
+        this.lastRemoteShotSfxTime = now;
+        this.audio.playWeaponFire(shooterPiece.type, true);
+      }
+    }
+
+    const startX = isLocalShooter ? shot.ox + shot.dx * 0.5 : shot.ox;
+    const startY = isLocalShooter ? shot.oy - 0.08 : shot.oy - 0.1;
+    const startZ = isLocalShooter ? shot.oz + shot.dz * 0.5 : shot.oz;
+    this.showBeam(
+      _v1.set(startX, startY, startZ),
+      _v3.set(shot.hitX, shot.hitY, shot.hitZ),
+      accentHex,
+    );
+
+    if (shot.hit) {
+      this.spawnParticleBurst(
+        _v3.set(shot.hitX, shot.hitY, shot.hitZ),
+        shot.headshot ? 0xfbbf24 : accentHex,
+        shot.headshot ? 12 : 7,
+      );
+      if (isLocalShooter) {
+        this.duelShotsHit++;
+        this.duelHitMarkerTimer = 0.16;
+        this.duelLastHitCrit = shot.headshot;
+        this.enemyHitFlashTimer = 0.065;
+        this.audio.playHitMarker(shot.headshot);
+        this.emitDuelHud();
+      } else {
+        this.duelTrauma = Math.min(0.85, this.duelTrauma + 0.32);
+        this.audio.playPlayerHurt();
+      }
+    } else {
+      this.spawnParticleBurst(
+        _v3.set(shot.hitX, shot.hitY, shot.hitZ),
+        0xcbd5e1,
+        4,
+      );
+    }
+  }
+
+  public applyServerVitals(vitals: {
+    whiteHp: number;
+    blackHp: number;
+    whiteAmmo: number;
+    blackAmmo: number;
+    whiteAbilityActive: boolean;
+    blackAbilityActive: boolean;
+  }): void {
+    if (!this.duelConfig || this.playPhase !== 'duel') return;
+    const isWhite = this.duelConfig.playerColor === 'white';
+    this.duelPlayerHp = isWhite ? vitals.whiteHp : vitals.blackHp;
+    this.enemyHp = isWhite ? vitals.blackHp : vitals.whiteHp;
+
+    const myServerAmmo = isWhite ? vitals.whiteAmmo : vitals.blackAmmo;
+    const myAbilityActive = isWhite
+      ? vitals.whiteAbilityActive
+      : vitals.blackAbilityActive;
+    const enemyAbilityActive = isWhite
+      ? vitals.blackAbilityActive
+      : vitals.whiteAbilityActive;
+
+    // Preserve local reload animation unless server synced full refill on ability
+    if (this.duelReloadTimer <= 0) {
+      this.duelAmmo = myServerAmmo;
+    }
+    if (myAbilityActive && this.duelAbilityActiveTimer <= 0) {
+      this.duelAbilityActiveTimer = 2.0;
+    }
+    this.enemyShieldTimer = enemyAbilityActive ? 0.6 : 0;
+    this.emitDuelHud();
+  }
+
+  public applyServerDuelEnded(playerWon: boolean): void {
+    if (!this.duelConfig || this.duelOutcomeWon !== null) return;
+    this.duelOutcomeWon = playerWon;
+    this.duelEndTimer = 0.9;
+    this.duelBannerText = playerWon ? 'DUEL VICTORY' : 'PIECE SHATTERED';
+    this.duelBannerTimer = 1.5;
+    if (playerWon) {
+      this.spawnParticleBurst(
+        _v1.set(this.enemyPos.x, 1.3, this.enemyPos.z),
+        0xd4a853,
+        28,
+      );
+      this.audio.playVictory();
+    } else {
+      this.audio.playDefeat();
+    }
     this.emitDuelHud();
   }
 
@@ -1043,6 +1229,9 @@ export class GameSceneController {
     if (this.duelReloadTimer <= 0 && this.duelAmmo < spec.magSize) {
       this.duelReloadTimer = spec.reloadTime;
       this.audio.playReload();
+      if (this.duelConfig.isMultiplayer) {
+        this.callbacks.onMultiplayerReload?.();
+      }
       this.emitDuelHud();
     }
   }
@@ -1060,6 +1249,17 @@ export class GameSceneController {
 
     const fwdX = -Math.sin(this.duelYaw);
     const fwdZ = -Math.cos(this.duelYaw);
+
+    let queenAim:
+      | {
+          ox: number;
+          oy: number;
+          oz: number;
+          dx: number;
+          dy: number;
+          dz: number;
+        }
+      | undefined;
 
     switch (playerPiece.type) {
       case 'pawn':
@@ -1085,13 +1285,34 @@ export class GameSceneController {
         this.duelFireCooldown = 0;
         break;
       case 'queen':
-        // Fire 5-bolt spread burst
-        this.fireSpreadVolley(spec, 5, 0.085);
+        if (this.duelConfig.isMultiplayer) {
+          this.weaponRecoil = 1.0;
+          this.muzzleFlashTimer = 0.07;
+          this.audio.playWeaponFire('queen');
+          this.camera.getWorldDirection(_v1);
+          queenAim = {
+            ox: this.camera.position.x,
+            oy: this.camera.position.y - 0.06,
+            oz: this.camera.position.z,
+            dx: _v1.x,
+            dy: _v1.y,
+            dz: _v1.z,
+          };
+        } else {
+          // Fire 5-bolt spread burst locally in singleplayer
+          this.fireSpreadVolley(spec, 5, 0.085);
+        }
         break;
       case 'king':
-        this.duelPlayerHp = Math.min(this.duelPlayerMaxHp, this.duelPlayerHp + 45);
+        if (!this.duelConfig.isMultiplayer) {
+          this.duelPlayerHp = Math.min(this.duelPlayerMaxHp, this.duelPlayerHp + 45);
+        }
         this.duelAbilityActiveTimer = 2.5;
         break;
+    }
+
+    if (this.duelConfig.isMultiplayer) {
+      this.callbacks.onMultiplayerAbility?.(queenAim);
     }
     this.emitDuelHud();
   }
@@ -1160,6 +1381,11 @@ export class GameSceneController {
     const ox = this.camera.position.x;
     const oy = this.camera.position.y - 0.04;
     const oz = this.camera.position.z;
+
+    if (this.duelConfig.isMultiplayer) {
+      this.callbacks.onMultiplayerFire?.(ox, oy, oz, _v1.x, _v1.y, _v1.z);
+      return;
+    }
 
     const accentHex = parseInt(spec.accentHex.slice(1), 16);
 
@@ -1512,9 +1738,55 @@ export class GameSceneController {
     this.viewModelAnchor.rotation.x =
       this.weaponRecoil * 0.18 + (this.duelReloadTimer > 0 ? -0.45 : 0);
 
-    // Update Enemy AI
+    // Update Opponent: Remote player pose sync in multiplayer vs AI in solo
     if (this.duelOutcomeWon === null) {
-      this.updateDuelEnemyAI(dt, eSpec);
+      if (this.duelConfig.isMultiplayer) {
+        this.enemyPos.x = THREE.MathUtils.damp(
+          this.enemyPos.x,
+          this.remotePoseTarget.x,
+          16,
+          dt,
+        );
+        this.enemyPos.y = THREE.MathUtils.damp(
+          this.enemyPos.y,
+          this.remotePoseTarget.y,
+          16,
+          dt,
+        );
+        this.enemyPos.z = THREE.MathUtils.damp(
+          this.enemyPos.z,
+          this.remotePoseTarget.z,
+          16,
+          dt,
+        );
+        if (this.enemyGroup) {
+          this.enemyGroup.position.copy(this.enemyPos);
+          this.enemyGroup.rotation.y = this.remotePoseTarget.yaw + Math.PI;
+          const flash = this.enemyHitFlashTimer > 0;
+          this.enemyGroup.traverse((obj) => {
+            if ((obj as THREE.Mesh).isMesh) {
+              const mat = (obj as THREE.Mesh).material as THREE.MeshStandardMaterial;
+              if (mat && mat.emissive && mat.emissiveIntensity < 1.0) {
+                mat.emissive.setHex(flash ? 0xffffff : 0x000000);
+                mat.emissiveIntensity = flash ? 0.65 : 0;
+              }
+            }
+          });
+        }
+        const nowMs = performance.now();
+        if (nowMs - this.lastPoseEmitTime >= 50) {
+          this.lastPoseEmitTime = nowMs;
+          this.callbacks.onMultiplayerPose?.(
+            this.duelPlayerPos.x,
+            this.duelPlayerPos.y,
+            this.duelPlayerPos.z,
+            this.duelYaw,
+            this.duelPitch,
+          );
+        }
+      } else {
+        this.updateDuelEnemyAI(dt, eSpec);
+      }
     }
 
     // Update Projectiles

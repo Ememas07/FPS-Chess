@@ -4,6 +4,7 @@ interface TitleOverlayProps {
   difficulty: Difficulty;
   onSelectDifficulty: (diff: Difficulty) => void;
   onStartMatch: () => void;
+  onOpenMultiplayer: () => void;
   onQuickDuel: () => void;
 }
 
@@ -17,6 +18,7 @@ export function TitleOverlay({
   difficulty,
   onSelectDifficulty,
   onStartMatch,
+  onOpenMultiplayer,
   onQuickDuel,
 }: TitleOverlayProps) {
   return (
@@ -28,7 +30,7 @@ export function TitleOverlay({
       />
 
       {/* Upper negative-space title & primary controls */}
-      <div className="relative z-10 my-auto max-w-md pointer-events-auto">
+      <div className="relative z-10 my-auto max-w-lg pointer-events-auto">
         {/* Custom Inline SVG Title Emblem & Lockup */}
         <div className="mb-6">
           <svg
@@ -99,7 +101,7 @@ export function TitleOverlay({
         {/* Difficulty Segmented Selector */}
         <div className="mb-6">
           <div className="text-xs font-medium text-[#9ca3af] mb-2">
-            Opponent Skill
+            Solo AI Skill
           </div>
           <div
             className="inline-flex items-center gap-1 p-1 rounded-lg bg-[#141824]/95 border border-white/12"
@@ -132,14 +134,21 @@ export function TitleOverlay({
             type="button"
             data-start="true"
             onClick={onStartMatch}
-            className="px-6 py-3 rounded-lg bg-[#d4a853] hover:bg-[#e1b967] text-[#0b0d12] font-semibold text-sm tracking-wide transition-colors whitespace-nowrap shrink-0 cursor-pointer shadow-lg focus-visible:outline-2 focus-visible:outline-white"
+            className="px-5 py-3 rounded-lg bg-[#d4a853] hover:bg-[#e1b967] text-[#0b0d12] font-semibold text-sm tracking-wide transition-colors whitespace-nowrap shrink-0 cursor-pointer shadow-lg focus-visible:outline-2 focus-visible:outline-white"
           >
-            Start Match
+            Start Solo
+          </button>
+          <button
+            type="button"
+            onClick={onOpenMultiplayer}
+            className="px-5 py-3 rounded-lg bg-[#171c29]/95 hover:bg-[#22293b] text-[#f3efe6] border border-[#d4a853]/55 font-semibold text-sm transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-[#d4a853]"
+          >
+            Online Multiplayer
           </button>
           <button
             type="button"
             onClick={onQuickDuel}
-            className="px-5 py-3 rounded-lg bg-[#171c29]/95 hover:bg-[#22293b] text-[#f3efe6] border border-white/15 font-semibold text-sm transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-[#d4a853]"
+            className="px-4 py-3 rounded-lg bg-[#171c29]/95 hover:bg-[#22293b] text-[#cbd5e1] border border-white/15 font-semibold text-sm transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-[#d4a853]"
           >
             Quick Duel
           </button>
